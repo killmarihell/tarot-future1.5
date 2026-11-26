@@ -1,0 +1,93 @@
+name: Build 3DSX
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # 1) Python: baixa as cartas RWS (domínio público) do Commons e gera os atlas pixelados.
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pillow
+
+      # cache dos downloads: reruns não batem de novo no Commons
+      - uses: actions/cache@v4
+        with:
+          path: build_assets/cache
+          key: rws-cards-v1-${{ hashFiles('tools/make_assets.py') }}
+          restore-keys: rws-cards-v1-
+
+      - name: Gerar atlas (cards.png, ui.png, icon.png)
+        run: python3 tools/make_assets.py --out build_assets --allow-missing
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets
+          path: |
+            build_assets/cards.png
+            build_assets/ui.png
+            icon.png
+
+  # 2) devkitPro: converte para .t3x e compila o .3dsx
+  build:
+    needs: assets
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: assets
+          path: _assets
+
+      - name: Ferramentas 3DS (instala só se faltar)
+        run: |
+          if ! command -v tex3ds >/dev/null 2>&1 || [ ! -f "$DEVKITPRO/libctru/include/citro2d.h" ]; then
+            dkp-pacman -Syu --noconfirm 3ds-dev
+          fi
+          command -v tex3ds
+          command -v smdhtool
+          command -v 3dsxtool
+
+      - name: Texturas (.t3x)
+        run: |
+          mkdir -p romfs/gfx build_assets
+          cp _assets/build_assets/cards.png _assets/build_assets/ui.png build_assets/
+          [ -f icon.png ] || cp _assets/icon.png icon.png
+          tex3ds -f rgba5551 -z auto -o romfs/gfx/cards.t3x build_assets/cards.png
+          tex3ds -f rgba8888 -z auto -o romfs/gfx/ui.t3x build_assets/ui.png
+
+      - name: Compilar
+        run: make -j$(nproc)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cartomancia-pratesi-3dsx
+          path: cartomancia-pratesi.3dsx
+
+  # 3) Ao dar push de uma tag v*, publica o .3dsx numa Release
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cartomancia-pratesi-3dsx
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: I trust you with my future! v1.5
+          files: cartomancia-pratesi.3dsx
